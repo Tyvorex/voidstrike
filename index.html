@@ -6,7 +6,7 @@
 <title>VOIDSTRIKE — 2D Open-World Space Shooter</title>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; background: #04060f; overflow: hidden; }
-  canvas { display: block; cursor: crosshair; }
+  canvas { display: block; cursor: crosshair; touch-action: none; }
   #ui { position: fixed; inset: 0; pointer-events: none; font-family: 'Segoe UI', system-ui, sans-serif; color: #cfe6ff; }
   .overlay {
     position: absolute; inset: 0; display: flex; flex-direction: column;
@@ -39,6 +39,7 @@
     <p><span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span> thrust &nbsp;&middot;&nbsp; ship aims at your mouse</p>
     <p><span class="key">Click</span> / <span class="key">Space</span> fire &nbsp;&middot;&nbsp; <span class="key">Shift</span> boost &nbsp;&middot;&nbsp; <span class="key">P</span> pause &nbsp;&middot;&nbsp; <span class="key">M</span> mute</p>
     <p>Momentum is real out here. Drift, slingshot, and watch the recoil.</p>
+    <p id="touchhint" class="hidden">Touch: left stick flies (push to the edge to boost), right stick aims and fires.</p>
     <p class="go">CLICK TO LAUNCH</p>
   </div>
   <div id="gameover" class="overlay hidden">
@@ -130,6 +131,63 @@ addEventListener('mousedown', () => {
   else if (state === 'over') reset();
 });
 addEventListener('mouseup', () => mouse.down = false);
+
+// ========================= TOUCH CONTROLS ============================
+// Twin-stick: left half of screen = thrust stick (absolute direction, push
+// to the edge to boost), right half = aim stick (aims and fires while held).
+const sticks = {
+  move: { id: null, bx: 0, by: 0, dx: 0, dy: 0, mag: 0 },
+  aim:  { id: null, bx: 0, by: 0, dx: 0, dy: 0, mag: 0 }
+};
+const STICK_R = 64;
+let touchMode = false;
+const pauseBtn = { x: 0, y: 34, r: 24, visible: false };
+
+function onTouchStart(e) {
+  e.preventDefault();
+  touchMode = true;
+  audio.init();
+
+
+  if (state === 'pause') { state = 'play'; return; }
+  for (const t of e.changedTouches) {
+    if (state === 'play' && pauseBtn.visible &&
+        dist2(t.clientX, t.clientY, pauseBtn.x, pauseBtn.y) < (pauseBtn.r * 1.6) * (pauseBtn.r * 1.6)) {
+      state = 'pause';
+      sticks.move.id = null; sticks.move.mag = 0;
+      sticks.aim.id = null; sticks.aim.mag = 0;
+      return;
+    }
+    const s = t.clientX < W / 2 ? sticks.move : sticks.aim;
+    if (s.id !== null) continue;
+    s.id = t.identifier; s.bx = t.clientX; s.by = t.clientY;
+    s.dx = 0; s.dy = 0; s.mag = 0;
+  }
+}
+function onTouchMove(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    for (const s of [sticks.move, sticks.aim]) {
+      if (s.id !== t.identifier) continue;
+      let vx = t.clientX - s.bx, vy = t.clientY - s.by;
+      const d = Math.hypot(vx, vy);
+      if (d > STICK_R) { vx = vx / d * STICK_R; vy = vy / d * STICK_R; }
+      s.dx = vx / STICK_R; s.dy = vy / STICK_R;
+      s.mag = Math.min(1, d / STICK_R);
+    }
+  }
+}
+function onTouchEnd(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches)
+    for (const s of [sticks.move, sticks.aim])
+      if (s.id === t.identifier) { s.id = null; s.dx = 0; s.dy = 0; s.mag = 0; }
+}
+canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+canvas.addEventListener('touchend', onTouchEnd, { passive: false });
+canvas.addEventListener('touchcancel', onTouchEnd, { passive: false });
+
 
 // ============================== AUDIO ================================
 const audio = {
@@ -276,7 +334,8 @@ function update(dt) {
   if (s.alive) {
     // aim at mouse (world coords)
     const mx = cam.x + (mouse.x - W / 2), my = cam.y + (mouse.y - H / 2);
-    const targetAngle = Math.atan2(my - s.y, mx - s.x);
+    let targetAngle = Math.atan2(my - s.y, mx - s.x);
+    if (sticks.aim.id !== null && sticks.aim.mag > 0.3) targetAngle = Math.atan2(sticks.aim.dy, sticks.aim.dx);
     let da = targetAngle - s.angle;
     while (da > Math.PI) da -= TAU; while (da < -Math.PI) da += TAU;
     s.angle += clamp(da, -10 * dt, 10 * dt);
@@ -289,8 +348,12 @@ function update(dt) {
     if (keys['KeyS'] || keys['ArrowDown'])  { tx -= ca * 0.6; ty -= sa * 0.6; }
     if (keys['KeyA'] || keys['ArrowLeft'])  { tx += Math.cos(s.angle - Math.PI/2) * 0.7; ty += Math.sin(s.angle - Math.PI/2) * 0.7; }
     if (keys['KeyD'] || keys['ArrowRight']) { tx += Math.cos(s.angle + Math.PI/2) * 0.7; ty += Math.sin(s.angle + Math.PI/2) * 0.7; }
+    if (sticks.move.id !== null && sticks.move.mag > 0.15) { tx += sticks.move.dx; ty += sticks.move.dy; }
+    const tl = Math.hypot(tx, ty);
+    if (tl > 1) { tx /= tl; ty /= tl; }
     let boosting = false;
-    if ((keys['ShiftLeft'] || keys['ShiftRight']) && s.boost > 1 && (tx || ty)) {
+    const wantBoost = keys['ShiftLeft'] || keys['ShiftRight'] || (sticks.move.id !== null && sticks.move.mag > 0.92);
+    if (wantBoost && s.boost > 1 && (tx || ty)) {
       boosting = true; s.boost = Math.max(0, s.boost - 34 * dt);
       if (Math.random() < 0.3) audio.boost();
     } else {
@@ -321,7 +384,7 @@ function update(dt) {
 
     // fire
     s.fireCd -= dt;
-    if ((mouse.down || keys['Space']) && s.fireCd <= 0) {
+    if ((mouse.down || keys['Space'] || (sticks.aim.id !== null && sticks.aim.mag > 0.45)) && s.fireCd <= 0) {
       s.fireCd = 0.13;
       const spread = rand(-0.045, 0.045);
       const ba = s.angle + spread;
@@ -653,7 +716,7 @@ function drawHUD() {
   if (audio.muted) ctx.fillText('MUTED (M)', W - 20, 76);
 
   // minimap
-  const mw = 168, mh = mw * WORLD.h / WORLD.w, mx = W - mw - 18, my = H - mh - 18;
+  const mw = W < 600 ? 110 : 168, mh = mw * WORLD.h / WORLD.w, mx = W - mw - 18, my = H - mh - 18;
   const sx = mw / WORLD.w, sy = mh / WORLD.h;
   ctx.fillStyle = 'rgba(8,14,30,0.75)'; ctx.fillRect(mx, my, mw, mh);
   ctx.strokeStyle = '#2a4a7a'; ctx.strokeRect(mx, my, mw, mh);
@@ -669,6 +732,24 @@ function drawHUD() {
   ctx.strokeStyle = 'rgba(127,208,255,0.3)';
   ctx.strokeRect(mx + (cam.x - W / 2) * sx, my + (cam.y - H / 2) * sy, W * sx, H * sy);
 
+  // touch controls overlay
+  if (touchMode && state === 'play') {
+    pauseBtn.visible = true; pauseBtn.x = W / 2; pauseBtn.y = W < 600 ? 96 : 34;
+    for (const s of [sticks.move, sticks.aim]) {
+      if (s.id === null) continue;
+      ctx.globalAlpha = 0.22; ctx.fillStyle = '#7fd0ff';
+      ctx.beginPath(); ctx.arc(s.bx, s.by, STICK_R, 0, TAU); ctx.fill();
+      ctx.globalAlpha = 0.55;
+      ctx.beginPath(); ctx.arc(s.bx + s.dx * STICK_R, s.by + s.dy * STICK_R, 26, 0, TAU); ctx.fill();
+    }
+    ctx.globalAlpha = 0.5; ctx.fillStyle = '#0d1830';
+    ctx.beginPath(); ctx.arc(pauseBtn.x, pauseBtn.y, pauseBtn.r, 0, TAU); ctx.fill();
+    ctx.globalAlpha = 1; ctx.strokeStyle = '#3a5a8a'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = '#aee0ff';
+    ctx.fillRect(pauseBtn.x - 7, pauseBtn.y - 9, 5, 18);
+    ctx.fillRect(pauseBtn.x + 2, pauseBtn.y - 9, 5, 18);
+  } else pauseBtn.visible = false;
+
   if (state === 'pause') {
     ctx.fillStyle = 'rgba(2,4,12,0.6)'; ctx.fillRect(0, 0, W, H);
     ctx.textAlign = 'center'; ctx.fillStyle = '#7fd0ff';
@@ -682,6 +763,10 @@ function drawHUD() {
 // ============================= LOOP ==================================
 state = 'menu';
 reset0();
+if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
+  const th = document.getElementById('touchhint');
+  if (th) th.classList.remove('hidden');
+}
 function reset0() { // draw a live world behind the menu
   ship = { x: WORLD.w/2, y: WORLD.h/2, vx: 0, vy: 0, angle: 0, r: 14,
     hull: 100, maxHull: 100, boost: 100, fireCd: 0, inv: 0, alive: true,
